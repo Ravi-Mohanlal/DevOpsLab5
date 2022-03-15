@@ -1,0 +1,84 @@
+---
+- hosts: cluster
+  gather_facts: False
+  become: yes
+  tasks:
+    - name: configure kubernetes
+      shell: |
+        echo "[kubernetes]
+        name=Kubernetes
+        baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+        enabled=1
+        gpgcheck=1
+        repo_gpgcheck=0
+        gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg" > /etc/yum.repos.d/kubernetes.repo
+
+    - ansible.builtin.package:
+        name:
+          - docker
+        state: present
+
+    - ansible.builtin.systemd:
+        state: started
+        name: docker
+
+    - ansible.builtin.command: docker run hello-world
+      register: docker_output
+
+
+
+- hosts: master
+  tasks:
+
+    - uri:
+        url: https://api.ipify.org?format=json
+        method: Get
+      changed_when: false
+      register: public_ip
+      until: public_ip.status == 200
+      retries: 6
+      delay: 10
+
+    - name: "leave swarm"
+      command: docker swarm leave --force
+      become: yes
+
+    - debug:
+        msg: "docker swarm init --advertise-addr {{ public_ip.json.ip }} | grep 'docker swarm join --token'"
+
+    - ansible.builtin.shell: "docker swarm init --advertise-addr {{ public_ip.json.ip }} | grep 'docker swarm join --token'"
+      become: yes
+      register: join_cmd
+
+    - name: Add join cmd to dummy host
+      add_host:
+          name: "join_cmd_holder"
+          cmd: "{{ join_cmd.stdout }}"
+
+
+
+- hosts: worker
+  tasks:
+    - name: "leave swarm"
+      command: docker swarm leave --force
+      become: yes
+
+    - name: print join cmd
+      debug:
+        msg: "[Worker] {{ hostvars['join_cmd_holder']['cmd'] }}"
+
+    - name: join
+      command: "{{ hostvars['join_cmd_holder']['cmd'] }}"
+      become: yes
+
+
+- hosts: master
+  tasks:
+    - name: get nodes
+      command: docker node ls
+      become: yes
+      register: nodes_out
+
+    - name: print nodes
+      debug:
+        var: nodes_out
